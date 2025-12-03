@@ -116,7 +116,7 @@ def analyze(csv_path=None, csv_ir=None, csv_tv=None,
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument('--csv', type=str, default='my_yolo/results/dual_sync_stats.csv',
+    ap.add_argument('--csv', type=str, default='./results/both.csv',
                     help='合并CSV路径（包含IR与TV）')
     ap.add_argument('--csv_ir', type=str, default=None,
                     help='IR单独CSV路径（可选）')

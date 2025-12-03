@@ -10,7 +10,7 @@ def list_formats(dev):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--save', type=str, default='my_yolo/configs/cameras.yaml')
+    ap.add_argument('--save', type=str, default='yolo_track_uav/configs/cameras.yaml')
     args = ap.parse_args()
 
     devices_info = list_devices()
@@ -29,7 +29,7 @@ def main():
 
     # 简单保存文本（你可以手工挑选 IR/TV 的 dev 与格式）
     import os
-    os.makedirs('my_yolo/configs', exist_ok=True)
+    os.makedirs('yolo_track_uav/configs', exist_ok=True)
     with open(args.save, 'w') as f:
         f.write("# inspect and edit IR/TV devices\n")
         for d in rec['devices']:
