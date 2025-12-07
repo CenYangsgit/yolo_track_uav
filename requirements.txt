@@ -1,0 +1,28 @@
+# YOLOv8 UAV Target Detection and Tracking Requirements
+# RK3588 开发板依赖包
+
+# Core dependencies
+# numpy>=1.21.0
+# PyYAML>=6.0
+
+# OpenCV（推荐使用系统仓库版本以获得 GStreamer 支持）
+# 注意：在 RK3588 开发板上，为了启用 GStreamer 后端，
+# 建议使用 apt 安装而不是 pip 安装 opencv-python：
+#   sudo apt install -y python3-opencv libopencv-dev
+# 如果已经通过 apt 安装，则无需在此处再额外安装 opencv-python。
+
+# Serial communication
+# pyserial>=3.5
+
+# RTSP streaming (GStreamer Python bindings)
+# Note: GStreamer needs to be installed via system package manager
+# sudo apt-get install python3-gi gstreamer1.0-tools gstreamer1.0-plugins-base \
+#                      gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+#                      gstreamer1.0-rtsp libgstrtspserver-1.0-dev
+
+# RKNN Toolkit Lite2 (RK3588 specific)
+# Install manually: python3 -m pip install rknn_toolkit_lite2-2.3.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+
+# Optional for development/testing
+# matplotlib>=3.3.0
+# pandas>=1.3.0

@@ -4,8 +4,8 @@ import numpy as np
 import cv2
 from rknnlite.api import RKNNLite
 
-MODEL = "/home/firefly/my_yolo/weights/IR.rknn"
-IMAGE = "/home/firefly/my_yolo/datasets/images/IR/frame_0007.jpg"
+MODEL = "/home/firefly/yolo_track_uav/weights/IR.rknn"
+IMAGE = "/home/firefly/yolo_track_uav/datasets/images/IR/frame_0007.jpg"
 SIZE  = 640                   
 TO_RGB = True                 
 MEAN = [0, 0, 0]              

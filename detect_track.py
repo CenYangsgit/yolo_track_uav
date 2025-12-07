@@ -11,7 +11,7 @@ import time
 from py_utils.coco_utils import COCO_test_helper
 
 # 为不同模型准备独立的 yolov8 模块（方案4）
-# 优先使用 yolov8_ir / yolov8_tv；若不存在则回退到 yolov8（向后兼容）
+# 优先使用 yolov8_ir / yolov8_tv；
 y8_ir = None
 y8_tv = None
 y8_default = None
@@ -23,32 +23,23 @@ try:
     import yolov8_tv as y8_tv
 except Exception:
     y8_tv = None
-try:
-    import yolov8 as y8_default  # 旧版/通用模块
-except Exception:
-    y8_default = None
-
 
 def _select_y8_module(model_path: str):
     """
     根据模型文件名选择对应的 yolov8 模块：
     - 文件名包含 'ir' -> yolov8_ir
     - 文件名包含 'tv' -> yolov8_tv
-    - 否则回退 yolov8（若可用），再退回 yolov8_ir（最后兜底）
     """
     name = (osp.basename(model_path) if model_path else "").lower()
     if 'ir' in name and y8_ir is not None:
         return y8_ir, 'ir'
     if 'tv' in name and y8_tv is not None:
         return y8_tv, 'tv'
-    if y8_default is not None:
-        return y8_default, 'default'
-    # 兜底：至少返回一个模块，避免崩溃
     if y8_ir is not None:
         return y8_ir, 'ir'
     if y8_tv is not None:
         return y8_tv, 'tv'
-    raise RuntimeError("No yolov8 module available: please provide yolov8_ir.py / yolov8_tv.py or yolov8.py.")
+    raise RuntimeError("No yolov8 module available: please provide yolov8_ir.py / yolov8_tv.py.")
 
 
 # =============== 用户可编辑区域（无需记命令，改这里就行） ===============
@@ -59,30 +50,30 @@ DEVICE_ID = None
 IMG_SHOW = False
 SAVE_VIDEO = True
 SAVE_IMAGE = True
-RESULT_ROOT = 'my_yolo/results/detect_track'
+RESULT_ROOT = './results/detect_track'
 QUIET_DEFAULT = True
 
 # 多任务示例（支持 IR/TV 各自尺寸，自动匹配 yolov8_ir/yolov8_tv）
 TASKS = [
     {
-        'model_path': 'my_yolo/weights/IR.rknn',
-        'img_folder': 'my_yolo/datasets/images/IR',
+        'model_path': './weights/IR.rknn',
+        'img_folder': './datasets/images/IR',
         'img_size': '640x640',
         'enabled': True,
         'img_save': True,
         'result_tag': 'IR_images',
     },
     {
-        'model_path': 'my_yolo/weights/TV.rknn',
-        'img_folder': 'my_yolo/datasets/images/TV',
+        'model_path': './weights/TV.rknn',
+        'img_folder': './datasets/images/TV',
         'img_size': '1088x1088',
         'enabled': True,
         'img_save': True,
         'result_tag': 'TV_images',
     },
     {
-        'model_path': 'my_yolo/weights/IR.rknn',
-        'video_file': 'my_yolo/datasets/video/IR/IR.mp4',
+        'model_path': './weights/IR.rknn',
+        'video_file': './datasets/video/IR/IR.mp4',
         'img_size': '640x640',
         'enabled': True,
         'save_video': True,
@@ -92,8 +83,8 @@ TASKS = [
         'keep_name': True,
     },
     {
-        'model_path': 'my_yolo/weights/TV.rknn',
-        'video_folder': 'my_yolo/datasets/video/TV/TV.mp4',
+        'model_path': './weights/TV.rknn',
+        'video_file': './datasets/video/TV/TV.mp4',
         'img_size': '1088x1088',
         'enabled': True,
         'save_video': True,
@@ -103,8 +94,8 @@ TASKS = [
         'keep_name': True,
     },
     {
-        'model_path': 'my_yolo/weights/xx.rknn',
-        'video_folder': 'my_yolo/datasets/video',
+        'model_path': './weights/xx.rknn',
+        'video_folder': './datasets/video',
         'img_size': '640x640',
         'enabled': False,
         'save_video': True,
@@ -327,15 +318,21 @@ def process_single_video(y8m, args, model, platform, vpath):
     t0 = time.time()
 
     def _print_progress():
-        if not getattr(args, 'quiet', False):
+        # 简洁的进度条显示（每10帧或每秒更新一次）
+        if frame_idx % 10 != 0 and frame_idx != 1:
             return
         elapsed = max(1e-6, time.time() - t0)
         fps = frame_idx / elapsed if frame_idx > 0 else 0.0
         if total_frames > 0:
             pct = 100.0 * frame_idx / max(1, total_frames)
-            msg = f"\r[track] {pct:5.1f}% | {frame_idx}/{total_frames} | FPS: {fps:5.1f}"
+            bar_len = 30
+            filled = int(bar_len * pct / 100)
+            bar = '█' * filled + '░' * (bar_len - filled)
+            status = 'Tracking' if tracking else 'Detecting'
+            msg = f"\r[{bar}] {pct:5.1f}% | {frame_idx}/{total_frames} | {fps:5.1f} FPS | {status}"
         else:
-            msg = f"\r[track] frames {frame_idx} | FPS: {fps:5.1f}"
+            status = 'Tracking' if tracking else 'Detecting'
+            msg = f"\rFrame: {frame_idx:6d} | FPS: {fps:5.1f} | {status}"
         print(msg, end='', flush=True)
 
     try:
@@ -391,12 +388,13 @@ def process_single_video(y8m, args, model, platform, vpath):
         if args.img_show:
             cv2.destroyAllWindows()
 
-    if getattr(args, 'quiet', False):
-        print()
-    if args.save_video and out_path and not getattr(args, 'quiet', False):
-        print(f"[save] {out_path}")
-    elif args.save_video and out_path and getattr(args, 'quiet', False):
-        print(f"[done] saved: {out_path}")
+    # 输出总结信息
+    print()  # 换行
+    elapsed = time.time() - t0
+    avg_fps = frame_idx / max(elapsed, 1e-6)
+    print(f"✓ Completed: {frame_idx} frames in {elapsed:.1f}s (avg {avg_fps:.1f} FPS)")
+    if args.save_video and out_path:
+        print(f"✓ Video saved: {out_path}")
 
 
 def process_image_folder(y8m, args, model, platform, img_dir):

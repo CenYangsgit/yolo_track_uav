@@ -17,6 +17,11 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 from py_utils.coco_utils import COCO_test_helper
+from modules import SerialComm, TrackingData, TrackingStatus
+from modules.osd_overlay import OSDOverlay
+from modules.manual_selector import InteractiveSelector
+from utils.kalman_filter import KalmanFilter, BboxKalmanFilter
+from web.manual_control import set_shared_state, run_app_in_thread
 
 # 模块回退逻辑
 y8_ir = None
@@ -37,7 +42,14 @@ IR_WIDTH, IR_HEIGHT, IR_FPS = 640, 512, 50
 TV_DEVICE_ID = 11
 TV_WIDTH, TV_HEIGHT, TV_FPS = 1920, 1080, 25
 
-PREFERRED_FORMATS = ["YUY2", "YUYV", "UYVY", "NV16", "NV12"]
+PREFERRED_FORMATS = ["NV12", "UYVY","YUY2", "YUYV", "NV16"]
+
+
+# Web 交互共享状态（通过 dict 包一层，便于多线程共享引用）
+latest_ir_frame_ref = {"frame": None}
+latest_tv_frame_ref = {"frame": None}
+manual_bbox_ir_ref = {"bbox": None}
+manual_bbox_tv_ref = {"bbox": None}
 
 
 def build_pipeline(device_id, width, height, fps, pix_fmt, use_pattern=False):
@@ -83,8 +95,6 @@ def _select_y8_module(model_path: str):
         return y8_ir, 'ir'
     if 'tv' in name and y8_tv is not None:
         return y8_tv, 'tv'
-    if y8_default is not None:
-        return y8_default, 'default'
     if y8_ir is not None:
         return y8_ir, 'ir'
     if y8_tv is not None:
@@ -238,11 +248,94 @@ def build_arg_parser():
                     help='H.264 编码器类型（软件 x264 或硬件 mpph264enc）')
     ap.add_argument('--rtsp_bitrate', type=int, default=4096, help='H.264 码率（kbps）')
 
+    # 串口输出（协议要求：RS422 460800bps）
+    ap.add_argument('--serial_port', type=str, default=None,
+                    help='串口设备路径，例如 /dev/ttyS0 或 /dev/ttyUSB0；为空则不启用串口')
+    ap.add_argument('--serial_baud', type=int, default=460800,
+                    help='串口波特率，协议要求 460800')
+
+    # OSD / 交互 / 预测
+    ap.add_argument('--no_osd', action='store_true', help='关闭 OSD 叠加，仅输出原始画面')
+    ap.add_argument('--use_kalman', action='store_true', help='启用卡尔曼滤波平滑目标中心')
+    ap.add_argument('--manual_select', action='store_true', help='允许在窗口中按 m 进入手动框选目标')
+
+    # Web 手动框选（不影响 RTSP）
+    ap.add_argument('--manual_select_web', action='store_true',
+                    help='启用基于 Web 的手动框选（/manual 页面），不影响原有 RTSP 推流')
+
     return ap
+
+
+def _init_serial(args):
+    """根据命令行参数初始化串口，失败时仅打印警告并返回 None。"""
+    if not args.serial_port:
+        return None
+    try:
+        comm = SerialComm(port=args.serial_port, baudrate=args.serial_baud, auto_reconnect=True)
+        if comm.connect():
+            print(f"[serial] connected to {args.serial_port} @ {args.serial_baud}")
+            return comm
+        print(f"[serial] connect failed: {args.serial_port}")
+    except Exception as e:
+        print(f"[serial] init error: {e}")
+    return None
+
+
+def _send_tracking(comm, ts, frame_idx, center, bbox, status, confidence):
+    """向串口发送当前帧的跟踪数据。
+
+    - center: (cx, cy) 图像中心
+    - bbox:   (x, y, w, h) 目标框；None 表示无目标
+    - status: TrackingStatus
+    """
+    if comm is None:
+        return
+
+    cx, cy = center
+    if bbox:
+        x, y, w, h = bbox
+        tx = x + w // 2
+        ty = y + h // 2
+        offx = tx - cx
+        offy = ty - cy
+    else:
+        x = y = w = h = 0
+        offx = offy = 0
+
+    data = TrackingData(
+        timestamp=float(ts),
+        status=status,
+        target_x=int(x),
+        target_y=int(y),
+        target_w=int(w),
+        target_h=int(h),
+        offset_x=int(offx),
+        offset_y=int(offy),
+        confidence=float(confidence or 0.0),
+    )
+    comm.send_tracking_data(data)
 
 
 def main():
     args = build_arg_parser().parse_args()
+
+    # 若启用 Web 手动框选，则启动 Flask 服务（守护线程），并注入共享状态
+    if args.manual_select_web:
+        set_shared_state(
+            latest_ir_frame_ref,
+            latest_tv_frame_ref,
+            manual_bbox_ir_ref,
+            manual_bbox_tv_ref,
+        )
+        run_app_in_thread(host="0.0.0.0", port=5000)
+        print("[web] manual control enabled: http://<board-ip>:5000/manual")
+
+    # 串口（可选）：仅在提供 serial_port 时启用
+    serial_comm_ir = serial_comm_tv = None
+    if args.serial_port:
+        # 双路共用一个串口，将 IR/TV 信息按帧分别发送
+        serial_comm_ir = _init_serial(args)
+        serial_comm_tv = serial_comm_ir
 
     # 打开视频源（按模式）
     cap_ir = cap_tv = None
@@ -290,6 +383,7 @@ def main():
     tracker_ir = tracker_tv = None
     tracking_ir = tracking_tv = False
     bbox_ir = bbox_tv = None
+    score_ir = score_tv = 0.0
 
     center_ir = (IR_WIDTH // 2, IR_HEIGHT // 2)
     center_tv = (TV_WIDTH // 2, TV_HEIGHT // 2)
@@ -314,6 +408,21 @@ def main():
     t0 = time.time()
     print(f"[run] start: mode={args.mode}, IR={getattr(mod_ir,'IMG_SIZE',None)}, TV={getattr(mod_tv,'IMG_SIZE',None)}")
 
+    # OSD 与交互
+    osd_ir = osd_tv = None
+    selector = None
+    if not args.no_osd:
+        osd_ir = OSDOverlay(language="zh")
+        osd_tv = OSDOverlay(language="zh")
+    if not args.headless and args.manual_select:
+        selector = InteractiveSelector()
+
+    # 卡尔曼滤波（针对目标中心）
+    kf_ir = kf_tv = None
+    if args.use_kalman:
+        kf_ir = KalmanFilter(dt=1.0)
+        kf_tv = KalmanFilter(dt=1.0)
+
     try:
         while True:
             ok_ir = ok_tv = False
@@ -329,6 +438,12 @@ def main():
 
             ts = time.time()
 
+            # 更新 Web 预览帧（若启用 manual_select_web 时使用，不影响 RTSP）
+            if ok_ir and frm_ir is not None:
+                latest_ir_frame_ref["frame"] = frm_ir
+            if ok_tv and frm_tv is not None:
+                latest_tv_frame_ref["frame"] = frm_tv
+
             # IR 分支（独立跳帧）
             if cap_ir and ok_ir:
                 if not tracking_ir:
@@ -338,6 +453,7 @@ def main():
                     if do_det:
                         boxes, cls, sc = infer_once(mod_ir, model_ir, plat_ir, frm_ir, helper_ir)
                         bb = pick_primary_target(boxes, sc)
+                        score_ir = float(np.max(sc)) if sc is not None and len(sc) > 0 else 0.0
                         if bb:
                             try:
                                 tracker_ir = create_tracker()
@@ -353,12 +469,61 @@ def main():
                     bbox_ir = tuple(map(int, bb)) if suc else None
                     tracking_ir = suc
 
-                if not args.headless and bbox_ir:
+                # 卡尔曼更新 / 预测（使用目标中心）
+                if args.use_kalman and bbox_ir:
                     x, y, w, h = bbox_ir
-                    cv2.rectangle(frm_ir, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                    cv2.imshow("IR", frm_ir)
+                    cx_t, cy_t = x + w // 2, y + h // 2
+                    if not kf_ir.initialized:
+                        kf_ir.initialize(cx_t, cy_t)
+                    else:
+                        kf_ir.predict()
+                        kf_ir.update(cx_t, cy_t)
+
+                # OSD / 显示
+                if not args.headless:
+                    disp_ir = frm_ir.copy()
+                    if not args.no_osd and osd_ir is not None:
+                        status_str = "tracking" if bbox_ir else "lost"
+                        # 若启用卡尔曼，则使用滤波后的中心计算偏移
+                        off_ir_tmp = center_offset(center_ir, bbox_ir)
+                        if args.use_kalman and kf_ir and kf_ir.initialized:
+                            kx, ky = kf_ir.x[0, 0], kf_ir.x[1, 0]
+                            offx_k, offy_k = int(kx - center_ir[0]), int(ky - center_ir[1])
+                            off_ir_tmp = (offx_k, offy_k)
+                        osd_ir.draw_complete_osd(
+                            disp_ir,
+                            bbox=bbox_ir,
+                            offset=off_ir_tmp if bbox_ir else None,
+                            status=status_str,
+                            fps=float(frame_idx / max(1e-6, time.time() - t0)),
+                            frame_idx=frame_idx,
+                            mode="IR",
+                        )
+                    elif bbox_ir:
+                        x, y, w, h = bbox_ir
+                        cv2.rectangle(disp_ir, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    cv2.imshow("IR", disp_ir)
                 if pusher_ir:
-                    pusher_ir.push(frm_ir)
+                    pusher_ir.push(disp_ir if not args.headless else frm_ir)
+
+                # Web 手动框选：若收到来自 /manual_ir 的 bbox，则立即重置 IR tracker
+                if args.manual_select_web and manual_bbox_ir_ref.get("bbox") is not None:
+                    bbox_manual_ir = manual_bbox_ir_ref["bbox"]
+                    manual_bbox_ir_ref["bbox"] = None
+                    if bbox_manual_ir and frm_ir is not None:
+                        bbox_ir = bbox_manual_ir
+                        try:
+                            tracker_ir = create_tracker()
+                            tracker_ir.init(frm_ir, bbox_ir)
+                            tracking_ir = True
+                            print("[IR] manual bbox applied via web:", bbox_ir)
+                        except Exception as e:
+                            print("[IR] manual tracker init failed (web):", e)
+                            tracking_ir = False
+                            tracker_ir = None
+                        if args.use_kalman and kf_ir is not None and bbox_ir is not None:
+                            x, y, w, h = bbox_ir
+                            kf_ir.initialize(x + w // 2, y + h // 2)
 
             # TV 分支（独立跳帧）
             if cap_tv and ok_tv:
@@ -369,6 +534,7 @@ def main():
                     if do_det:
                         boxes, cls, sc = infer_once(mod_tv, model_tv, plat_tv, frm_tv, helper_tv)
                         bb = pick_primary_target(boxes, sc)
+                        score_tv = float(np.max(sc)) if sc is not None and len(sc) > 0 else 0.0
                         if bb:
                             try:
                                 tracker_tv = create_tracker()
@@ -384,16 +550,78 @@ def main():
                     bbox_tv = tuple(map(int, bb)) if suc else None
                     tracking_tv = suc
 
-                if not args.headless and bbox_tv:
+                # 卡尔曼更新 / 预测
+                if args.use_kalman and bbox_tv:
                     x, y, w, h = bbox_tv
-                    cv2.rectangle(frm_tv, (x, y), (x + w, y + h), (255, 0, 0), 2)
-                    cv2.imshow("TV", frm_tv)
-                if pusher_tv:
-                    pusher_tv.push(frm_tv)
+                    cx_t, cy_t = x + w // 2, y + h // 2
+                    if not kf_tv.initialized:
+                        kf_tv.initialize(cx_t, cy_t)
+                    else:
+                        kf_tv.predict()
+                        kf_tv.update(cx_t, cy_t)
 
-            # 偏移统计
+                # OSD / 显示
+                if not args.headless:
+                    disp_tv = frm_tv.copy()
+                    if not args.no_osd and osd_tv is not None:
+                        status_str = "tracking" if bbox_tv else "lost"
+                        off_tv_tmp = center_offset(center_tv, bbox_tv)
+                        if args.use_kalman and kf_tv and kf_tv.initialized:
+                            kx, ky = kf_tv.x[0, 0], kf_tv.x[1, 0]
+                            offx_k, offy_k = int(kx - center_tv[0]), int(ky - center_tv[1])
+                            off_tv_tmp = (offx_k, offy_k)
+                        osd_tv.draw_complete_osd(
+                            disp_tv,
+                            bbox=bbox_tv,
+                            offset=off_tv_tmp if bbox_tv else None,
+                            status=status_str,
+                            fps=float(frame_idx / max(1e-6, time.time() - t0)),
+                            frame_idx=frame_idx,
+                            mode="TV",
+                        )
+                    elif bbox_tv:
+                        x, y, w, h = bbox_tv
+                        cv2.rectangle(disp_tv, (x, y), (x + w, y + h), (255, 0, 0), 2)
+                    cv2.imshow("TV", disp_tv)
+                if pusher_tv:
+                    pusher_tv.push(disp_tv if not args.headless else frm_tv)
+
+                # Web 手动框选：若收到来自 /manual_tv 的 bbox，则立即重置 tracker
+                if args.manual_select_web and manual_bbox_tv_ref.get("bbox") is not None:
+                    bbox_manual = manual_bbox_tv_ref["bbox"]
+                    manual_bbox_tv_ref["bbox"] = None
+                    if bbox_manual and frm_tv is not None:
+                        bbox_tv = bbox_manual
+                        try:
+                            tracker_tv = create_tracker()
+                            tracker_tv.init(frm_tv, bbox_tv)
+                            tracking_tv = True
+                            print("[TV] manual bbox applied via web:", bbox_tv)
+                        except Exception as e:
+                            print("[TV] manual tracker init failed (web):", e)
+                            tracking_tv = False
+                            tracker_tv = None
+                        if args.use_kalman and kf_tv is not None and bbox_tv is not None:
+                            x, y, w, h = bbox_tv
+                            kf_tv.initialize(x + w // 2, y + h // 2)
+
+            # 偏移统计（串口与 CSV 使用同一套数据；若启用卡尔曼则用滤波中心）
             off_ir = center_offset(center_ir, bbox_ir) if cap_ir else (None, None)
             off_tv = center_offset(center_tv, bbox_tv) if cap_tv else (None, None)
+            if args.use_kalman and kf_ir and kf_ir.initialized and cap_ir and bbox_ir:
+                kx, ky = kf_ir.x[0, 0], kf_ir.x[1, 0]
+                off_ir = (int(kx - center_ir[0]), int(ky - center_ir[1]))
+            if args.use_kalman and kf_tv and kf_tv.initialized and cap_tv and bbox_tv:
+                kx, ky = kf_tv.x[0, 0], kf_tv.x[1, 0]
+                off_tv = (int(kx - center_tv[0]), int(ky - center_tv[1]))
+
+            # 串口发送（若启用）
+            if serial_comm_ir and cap_ir:
+                st_ir = TrackingStatus.TRACKING if bbox_ir else TrackingStatus.LOST
+                _send_tracking(serial_comm_ir, ts, frame_idx, center_ir, bbox_ir, st_ir, score_ir)
+            if serial_comm_tv and cap_tv:
+                st_tv = TrackingStatus.TRACKING if bbox_tv else TrackingStatus.LOST
+                _send_tracking(serial_comm_tv, ts, frame_idx, center_tv, bbox_tv, st_tv, score_tv)
 
             # 合并 CSV
             fout_all.write(
@@ -426,9 +654,45 @@ def main():
                 print(f"\r[run] frames={frame_idx} FPS≈{fps:5.1f}", end="", flush=True)
 
             if not args.headless:
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
                     print("\n[run] user pressed 'q', exit.")
                     break
+                # 手动框选目标（仅在启用 manual_select 时响应）
+                if selector is not None and key == ord('m'):
+                    # 优先使用 TV 画面选目标，其次 IR
+                    src_frame = None
+                    if cap_tv and ok_tv:
+                        src_frame = frm_tv
+                    elif cap_ir and ok_ir:
+                        src_frame = frm_ir
+                    if src_frame is not None:
+                        bbox_manual = selector.select_by_drag(src_frame)
+                        if bbox_manual:
+                            # 重置跟踪器和卡尔曼
+                            if cap_tv and ok_tv:
+                                bbox_tv = bbox_manual
+                                try:
+                                    tracker_tv = create_tracker()
+                                    tracker_tv.init(src_frame, bbox_tv)
+                                    tracking_tv = True
+                                except Exception as e:
+                                    print("[TV] manual tracker init failed:", e)
+                            elif cap_ir and ok_ir:
+                                bbox_ir = bbox_manual
+                                try:
+                                    tracker_ir = create_tracker()
+                                    tracker_ir.init(src_frame, bbox_ir)
+                                    tracking_ir = True
+                                except Exception as e:
+                                    print("[IR] manual tracker init failed:", e)
+                            if args.use_kalman:
+                                if cap_tv and ok_tv and bbox_tv:
+                                    x, y, w, h = bbox_tv
+                                    kf_tv.initialize(x + w // 2, y + h // 2)
+                                if cap_ir and ok_ir and bbox_ir:
+                                    x, y, w, h = bbox_ir
+                                    kf_ir.initialize(x + w // 2, y + h // 2)
             if args.max_frames and frame_idx >= args.max_frames:
                 print(f"\n[auto-exit] reach max_frames={args.max_frames}")
                 break
@@ -448,6 +712,11 @@ def main():
         fout_all.close()
         if fout_ir: fout_ir.close()
         if fout_tv: fout_tv.close()
+        if serial_comm_ir:
+            try:
+                serial_comm_ir.disconnect()
+            except Exception:
+                pass
         if args.quiet:
             print("\n[run] done.")
 

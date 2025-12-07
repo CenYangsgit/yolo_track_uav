@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <title>目标手动选择与修正</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+            background-color: #202124;
+            color: #e8eaed;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        header {
+            padding: 8px 16px;
+            background-color: #303134;
+            border-bottom: 1px solid #3c4043;
+        }
+        header h1 {
+            margin: 0;
+            font-size: 18px;
+        }
+        .content {
+            flex: 1;
+            display: flex;
+            padding: 8px;
+            box-sizing: border-box;
+            gap: 8px;
+        }
+        .panel {
+            flex: 1;
+            background-color: #171717;
+            border: 1px solid #3c4043;
+            border-radius: 4px;
+            padding: 8px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+        }
+        .panel h2 {
+            margin: 0 0 4px 0;
+            font-size: 14px;
+        }
+        .video-wrapper {
+            position: relative;
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: #000;
+            overflow: hidden;
+        }
+        .video-wrapper img,
+        .video-wrapper canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        .status-bar {
+            padding: 4px 8px;
+            font-size: 12px;
+            background-color: #202124;
+            border-top: 1px solid #3c4043;
+            color: #9aa0a6;
+        }
+        .hint {
+            font-size: 12px;
+            color: #9aa0a6;
+        }
+        a {
+            color: #8ab4f8;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <h1>目标检测识别与跟踪系统 - Web 手动框选</h1>
+        <div class="hint">
+            - 左侧 IR（红外）预览，仅查看；右侧 TV（可见光）支持鼠标拖拽框选。<br>
+            - 在 TV 画面中按住左键拖出矩形，松开后即发送手动框选到设备端。<br>
+            - 本页面不影响既有 RTSP 推流，仅作为额外交互通道。
+        </div>
+    </header>
+    <div class="content">
+        <div class="panel">
+            <h2>IR 红外预览（支持手动框选）</h2>
+            <div class="video-wrapper" id="ir-wrapper">
+                <img id="ir-img" src="/video_ir" alt="IR Video" />
+                <canvas id="ir-canvas"></canvas>
+            </div>
+            <div class="status-bar" id="ir-status">IR: 等待鼠标拖拽框选...</div>
+        </div>
+        <div class="panel">
+            <h2>TV 可见光预览（支持手动框选）</h2>
+            <div class="video-wrapper" id="tv-wrapper">
+                <img id="tv-img" src="/video_tv" alt="TV Video" />
+                <canvas id="tv-canvas"></canvas>
+            </div>
+            <div class="status-bar" id="tv-status">TV: 等待鼠标拖拽框选...</div>
+        </div>
+    </div>
+</div>
+<script>
+(function() {
+    const irImg = document.getElementById('ir-img');
+    const irCanvas = document.getElementById('ir-canvas');
+    const irWrapper = document.getElementById('ir-wrapper');
+    const irStatus = document.getElementById('ir-status');
+
+    const tvImg = document.getElementById('tv-img');
+    const tvCanvas = document.getElementById('tv-canvas');
+    const tvWrapper = document.getElementById('tv-wrapper');
+    const tvStatus = document.getElementById('tv-status');
+
+    function setupCanvas(img, canvas, wrapper, statusElem, postUrl, label) {
+        let isDrawing = false;
+        let startX = 0, startY = 0;
+        let currX = 0, currY = 0;
+
+        function resizeCanvas() {
+            const rect = wrapper.getBoundingClientRect();
+            canvas.width = rect.width;
+            canvas.height = rect.height;
+            img.style.width = rect.width + 'px';
+            img.style.height = rect.height + 'px';
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        img.addEventListener('load', resizeCanvas);
+
+        function getMousePos(evt) {
+            const rect = canvas.getBoundingClientRect();
+            return {
+                x: evt.clientX - rect.left,
+                y: evt.clientY - rect.top
+            };
+        }
+
+        canvas.addEventListener('mousedown', function(evt) {
+            isDrawing = true;
+            const pos = getMousePos(evt);
+            startX = pos.x;
+            startY = pos.y;
+            currX = pos.x;
+            currY = pos.y;
+            draw();
+        });
+
+        canvas.addEventListener('mousemove', function(evt) {
+            if (!isDrawing) return;
+            const pos = getMousePos(evt);
+            currX = pos.x;
+            currY = pos.y;
+            draw();
+        });
+
+        window.addEventListener('mouseup', function(evt) {
+            if (!isDrawing) return;
+            isDrawing = false;
+            const pos = getMousePos(evt);
+            currX = pos.x;
+            currY = pos.y;
+            draw();
+
+            const x = Math.min(startX, currX);
+            const y = Math.min(startY, currY);
+            const w = Math.abs(currX - startX);
+            const h = Math.abs(currY - startY);
+
+            if (w < 4 || h < 4) {
+                statusElem.textContent = label + ': 框太小，已忽略。';
+                clearCanvas();
+                return;
+            }
+
+            const payload = { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
+
+            statusElem.textContent = label + ': 正在发送手动框选...';
+
+            fetch(postUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            }).then(resp => resp.json())
+              .then(data => {
+                  statusElem.textContent = label + ': 手动框选已发送，bbox=' + JSON.stringify(data.bbox);
+              }).catch(err => {
+                  console.error(err);
+                  statusElem.textContent = label + ': 发送失败，请检查网络连接。';
+              }).finally(() => {
+                  clearCanvas();
+              });
+        });
+
+        function clearCanvas() {
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+
+        function draw() {
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (!isDrawing) return;
+            const x = Math.min(startX, currX);
+            const y = Math.min(startY, currY);
+            const w = Math.abs(currX - startX);
+            const h = Math.abs(currY - startY);
+            ctx.strokeStyle = '#00ff00';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x, y, w, h);
+        }
+
+        // 初始调整一次尺寸
+        resizeCanvas();
+    }
+
+    // 左侧 IR：发送到 /manual_ir
+    setupCanvas(irImg, irCanvas, irWrapper, irStatus, '/manual_ir', 'IR');
+    // 右侧 TV：发送到 /manual_tv
+    setupCanvas(tvImg, tvCanvas, tvWrapper, tvStatus, '/manual_tv', 'TV');
+})();
+</script>
+</body>
+</html>

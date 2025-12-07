@@ -1,0 +1,117 @@
+# System Configuration File
+# 系统配置文件
+
+# ==================== Camera Settings ====================
+camera:
+  ir:
+    device_id: 22
+    width: 640
+    height: 512
+    fps: 50
+    formats: ["YUY2", "YUYV", "UYVY", "NV16", "NV12"]
+  
+  tv:
+    device_id: 11
+    width: 1920
+    height: 1080
+    fps: 25
+    formats: ["NV12", "YUY2", "YUYV", "UYVY", "NV16"]
+
+# ==================== Model Settings ====================
+model:
+  ir:
+    path: "./weights/IR.rknn"
+    img_size: [640, 640]
+    branches: 3
+    obj_thresh: 0.25
+    nms_thresh: 0.45
+  
+  tv:
+    path: "./weights/TV.rknn"
+    img_size: [1088, 1088]
+    branches: 3
+    obj_thresh: 0.25
+    nms_thresh: 0.45
+
+# ==================== Tracking Settings ====================
+tracking:
+  tracker_type: "CSRT"  # CSRT, KCF, MOSSE
+  frame_skip_ir: 10     # IR检测间隔（帧）
+  frame_skip_tv: 15     # TV检测间隔（帧）
+  
+  kalman_filter:
+    enabled: true
+    process_noise: 1.0
+    measurement_noise: 5.0
+    prediction_steps: 5
+  
+  redetect_on_lost: true
+  lost_threshold: 30    # 丢失多少帧后重新检测
+
+# ==================== OSD Settings ====================
+osd:
+  enabled: true
+  language: "zh"        # zh, en
+  font_scale: 0.6
+  font_thickness: 2
+  show_crosshair: true
+  show_stats_panel: true
+  show_bbox: true
+  show_target_info: true
+
+# ==================== Image Saver Settings ====================
+image_saver:
+  enabled: false
+  save_dir: "./results/snapshots"
+  auto_save: false
+  auto_interval: 60     # 自动保存间隔（秒）
+  max_images: 1000      # 最大保存数量
+  
+  hotkeys:
+    save_ir: "i"        # 保存IR图像
+    save_tv: "t"        # 保存TV图像
+    save_both: "s"      # 同时保存
+
+# ==================== RTSP Settings ====================
+rtsp:
+  enabled: false
+  ir_mount: "/ir"
+  tv_mount: "/tv"
+  encoder: "x264"       # x264, mpph264enc
+  bitrate: 4096         # kbps
+  port: 8554
+
+# ==================== Serial Communication Settings ====================
+serial:
+  enabled: false
+  port: "/dev/ttyS0"
+  baudrate: 460800
+  auto_reconnect: true
+  send_interval: 0.1    # 发送间隔（秒）
+
+# ==================== CSV Logging Settings ====================
+csv_logging:
+  enabled: true
+  save_merged: true
+  merged_path: "./results/both.csv"
+  save_separate: true
+  ir_path: "./results/ir_csv/tracking.csv"
+  tv_path: "./results/tv_csv/tracking.csv"
+
+# ==================== Runtime Settings ====================
+runtime:
+  mode: "both"          # ir, tv, both
+  use_pattern: false    # 使用测试图案（无相机调试）
+  headless: false       # 无界面模式
+  quiet: false          # 安静模式
+  max_frames: 0         # 最大帧数（0=无限）
+  
+  manual_selection:
+    enabled: true       # 是否支持手动选择
+    hotkey: "m"         # 手动选择热键
+
+# ==================== Performance Settings ====================
+performance:
+  num_threads: 4
+  npu_cores: "0_1_2"    # RK3588 NPU核心
+  gpu_acceleration: false
